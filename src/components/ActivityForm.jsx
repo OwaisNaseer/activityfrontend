@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import './ActivityForm.css'
 
@@ -82,9 +82,14 @@ const ActivityForm = () => {
 
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState([])  // Array to store variants
-  console.log('result',results)
+  const [streamingTexts, setStreamingTexts] = useState([''])  // Array of streaming texts for each variant
+  const [currentStreamingVariant, setCurrentStreamingVariant] = useState(0)  // Which variant is currently streaming
+  const [isStreaming, setIsStreaming] = useState(false)  // Whether currently streaming
+  const [isThinking, setIsThinking] = useState(false)  // Whether LLM is thinking (before content starts)
   const [currentPage, setCurrentPage] = useState(0)  // 0-based index for pagination
   const [error, setError] = useState(null)
+  const [variantTransition, setVariantTransition] = useState(false)  // Smooth transition between variants
+  const responseContainerRef = useRef(null)  // Ref for auto-scrolling
 
   const subjects = [
     'Select Subject',
@@ -181,43 +186,73 @@ const ActivityForm = () => {
       num_variants: 1
     })
     setResults([])
+    setStreamingTexts([''])
+    setCurrentStreamingVariant(0)
+    setIsStreaming(false)
     setCurrentPage(0)
     setError(null)
     setLoading(false)
   }
 
+  // Auto-scroll to bottom when streaming text updates (like ChatGPT)
+  useEffect(() => {
+    if (isStreaming && responseContainerRef.current) {
+      const container = responseContainerRef.current
+      // Check if user is near bottom (within 150px) - if so, auto-scroll
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150
+      if (isNearBottom) {
+        // Instant scroll for real-time feel (like ChatGPT)
+        requestAnimationFrame(() => {
+          if (responseContainerRef.current) {
+            responseContainerRef.current.scrollTop = responseContainerRef.current.scrollHeight
+          }
+        })
+      }
+    }
+  }, [streamingTexts, currentStreamingVariant, isStreaming])
+
   const handleRegenerate = async () => {
     setLoading(true)
     setError(null)
+    setResults([])
+    const numVariants = parseInt(formData.num_variants) || 1
+    setStreamingTexts(Array(numVariants).fill(''))
+    setCurrentStreamingVariant(0)
+    setIsStreaming(true)
 
     // Validate required fields (same as handleSubmit)
     if (!formData.subject || formData.subject === 'Select Subject') {
       setError('Please select a subject')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.grade_band || formData.grade_band === 'Select Grade/Band') {
       setError('Please select a grade/band')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.topic_concept.trim()) {
       setError('Please enter a topic/concept')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.available_time || parseInt(formData.available_time) <= 0) {
       setError('Please enter a valid available time (greater than 0)')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.output_language || formData.output_language === 'Select Output Language') {
       setError('Please select an output language')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
@@ -225,6 +260,7 @@ const ActivityForm = () => {
     if (formData.output_language === 'Other' && !formData.languageOther.trim()) {
       setError('Please specify the language')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
@@ -243,43 +279,195 @@ const ActivityForm = () => {
         regenerate: true
       }
 
-      const requestUrl = getApiUrl('/api/generate-activity')
+      const requestUrl = getApiUrl('/api/generate-activity-stream')
+      console.log('Making streaming API request to:', requestUrl)
 
-      const apiResponse = await axios.post(
-        requestUrl,
-        payload,
-        {
+      const response = await fetch(requestUrl, {
+        method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          timeout: 120000  // Increased timeout for multiple variants
-        }
-      )
+        body: JSON.stringify(payload)
+      })
 
-      if (apiResponse.data.success) {
-        // Handle both single and multiple variants
-        if (apiResponse.data.activities && Array.isArray(apiResponse.data.activities)) {
-          setResults(apiResponse.data.activities)
-        } else if (apiResponse.data.activity) {
-          setResults([apiResponse.data.activity])
-        } else {
-          setError('No activities received in response')
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const numVariants = parseInt(formData.num_variants) || 1
+      const accumulatedTexts = Array(numVariants).fill('')
+      let currentVariant = 0
+      
+      // Initialize streaming texts array with correct size
+      setStreamingTexts(Array(numVariants).fill(''))
+      setIsThinking(true)  // Show thinking indicator initially
+
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          break
         }
-        setCurrentPage(0)  // Reset to first page
-        setError(null)
-      } else {
-        const errorMsg = apiResponse.data.error || 'Failed to generate activity'
-        setError(errorMsg)
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              
+              if (data.type === 'error') {
+                setError(data.content)
+                setIsStreaming(false)
+                setIsThinking(false)
+                setLoading(false)
+                return
+              } else if (data.type === 'variant_separator') {
+                // New variant starting - switch immediately, no blocking
+                currentVariant = data.variant - 1
+                setCurrentStreamingVariant(currentVariant)
+                setIsThinking(false)  // Content is starting
+                setIsStreaming(true)
+                setVariantTransition(false)  // No transition blocking
+                
+                setStreamingTexts(prev => {
+                  const newTexts = [...prev]
+                  if (newTexts.length <= currentVariant) {
+                    // Expand array if needed
+                    while (newTexts.length <= currentVariant) {
+                      newTexts.push('')
+                    }
+                  }
+                  newTexts[currentVariant] = ''
+                  return newTexts
+                })
+                // Reset accumulated text for new variant
+                if (accumulatedTexts.length <= currentVariant) {
+                  while (accumulatedTexts.length <= currentVariant) {
+                    accumulatedTexts.push('')
+                  }
+                } else {
+                  accumulatedTexts[currentVariant] = ''
+                }
+                
+                // Scroll to top smoothly for new variant (non-blocking)
+                if (responseContainerRef.current) {
+                  setTimeout(() => {
+                    if (responseContainerRef.current) {
+                      responseContainerRef.current.scrollTo({
+                        top: 0,
+                        behavior: 'smooth'
+                      })
+                    }
+                  }, 100)
+                }
+              } else if (data.type === 'content') {
+                // Real-time content streaming (like OpenAI) - show immediately
+                setIsThinking(false)
+                setIsStreaming(true)
+                setVariantTransition(false)  // No transition blocking
+                
+                const variantIdx = (data.variant || currentVariant + 1) - 1
+                if (variantIdx < 0 || variantIdx >= accumulatedTexts.length) {
+                  console.warn('Invalid variant index:', variantIdx, 'for', accumulatedTexts.length, 'variants')
+                  // Expand arrays if needed
+                  while (accumulatedTexts.length <= variantIdx) {
+                    accumulatedTexts.push('')
+                  }
+                  setStreamingTexts(prev => {
+                    const newTexts = [...prev]
+                    while (newTexts.length <= variantIdx) {
+                      newTexts.push('')
+                    }
+                    return newTexts
+                  })
+                }
+                
+                // Append content in real-time (no delays)
+                accumulatedTexts[variantIdx] += data.content
+                setStreamingTexts(prev => {
+                  const newTexts = [...prev]
+                  if (newTexts.length <= variantIdx) {
+                    while (newTexts.length <= variantIdx) {
+                      newTexts.push('')
+                    }
+                  }
+                  newTexts[variantIdx] = accumulatedTexts[variantIdx]
+                  return newTexts
+                })
+                setCurrentStreamingVariant(variantIdx)
+              } else if (data.type === 'status') {
+                // Status updates - show what's happening in backend
+                setIsThinking(data.content && data.content.includes('Generating'))
+                if (data.content && !data.content.includes('Generating')) {
+                  console.log('Status:', data.content, 'for variant', data.variant || 'all')
+                }
+              } else if (data.type === 'variant_complete') {
+                // Variant complete, save it
+                const variantIdx = data.variant - 1
+                setResults(prev => {
+                  const newResults = [...prev]
+                  if (newResults.length <= variantIdx) {
+                    while (newResults.length <= variantIdx) {
+                      newResults.push('')
+                    }
+                  }
+                  newResults[variantIdx] = accumulatedTexts[variantIdx]
+                  return newResults
+                })
+              } else if (data.type === 'done') {
+                // All streaming complete - properly reset all states
+                const finalResults = accumulatedTexts.filter(text => text.length > 0)
+                console.log('Done event received. Final results:', finalResults.map(t => t.length))
+                setResults(finalResults)
+                setCurrentPage(0)
+                setIsStreaming(false)
+                setIsThinking(false)
+                setLoading(false)
+                // Ensure we don't continue processing
+                return
+              } else if (data.type === 'status') {
+                // Status updates - might indicate thinking
+                if (data.content && data.content.includes('Generating')) {
+                  setIsThinking(true)
+                }
+                console.log('Status:', data.content)
+        } else {
+                console.log('Unknown event type:', data.type, data)
+              }
+            } catch (parseError) {
+              console.error('Error parsing SSE data:', parseError, line)
+            }
+          }
+        }
       }
+
+      // Finalize if streaming completed without 'done' event
+      console.log('Streaming completed. Accumulated texts:', accumulatedTexts.map(t => t.length))
+      const finalResults = accumulatedTexts.filter(text => text.length > 0)
+      if (finalResults.length > 0) {
+        console.log('Setting results with', finalResults.length, 'variants')
+        setResults(finalResults)
+        setCurrentPage(0)
+      } else {
+        console.warn('No content accumulated! Check backend logs.')
+        setError('No content was generated. Please check the console for errors.')
+      }
+      // Always reset all states when stream ends
+      setIsStreaming(false)
+      setIsThinking(false)
+      setLoading(false)
+
     } catch (err) {
-      if (err.response) {
-        setError(`Server error (${err.response.status}): ${err.response.data.detail || 'Server error occurred'}`)
-      } else if (err.request) {
-        setError(`Cannot connect to backend server. Please make sure the backend is running on port 8000.`)
-      } else {
-        setError(`Request error: ${err.message}`)
-      }
-    } finally {
+      console.error('Streaming Error:', err)
+      setError(`Error: ${err.message}`)
+      setIsStreaming(false)
+      setIsThinking(false)
       setLoading(false)
     }
   }
@@ -289,35 +477,44 @@ const ActivityForm = () => {
     setLoading(true)
     setError(null)
     setResults([])
+    const numVariants = parseInt(formData.num_variants) || 1
+    setStreamingTexts(Array(numVariants).fill(''))
+    setCurrentStreamingVariant(0)
+    setIsStreaming(true)
 
     // Validate required fields
     if (!formData.subject || formData.subject === 'Select Subject') {
       setError('Please select a subject')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.grade_band || formData.grade_band === 'Select Grade/Band') {
       setError('Please select a grade/band')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.topic_concept.trim()) {
       setError('Please enter a topic/concept')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.available_time || parseInt(formData.available_time) <= 0) {
       setError('Please enter a valid available time (greater than 0)')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
     if (!formData.output_language || formData.output_language === 'Select Output Language') {
       setError('Please select an output language')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
@@ -325,6 +522,7 @@ const ActivityForm = () => {
     if (formData.output_language === 'Other' && !formData.languageOther.trim()) {
       setError('Please specify the language')
       setLoading(false)
+      setIsStreaming(false)
       return
     }
 
@@ -343,50 +541,126 @@ const ActivityForm = () => {
         regenerate: false
       }
 
-      const requestUrl = getApiUrl('/api/generate-activity')
-      console.log('Making API request to:', requestUrl)
+      const requestUrl = getApiUrl('/api/generate-activity-stream')
+      console.log('Making streaming API request to:', requestUrl)
       console.log('Payload:', payload)
 
-      const apiResponse = await axios.post(
-        requestUrl,
-        payload,
-        {
+      const response = await fetch(requestUrl, {
+        method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          timeout: 120000  // Increased timeout for multiple variants
-        }
-      )
-      
-      console.log('API Response received:', apiResponse.data)
+        body: JSON.stringify(payload)
+      })
 
-      if (apiResponse.data.success) {
-        // Handle both single and multiple variants
-        if (apiResponse.data.activities && Array.isArray(apiResponse.data.activities)) {
-          setResults(apiResponse.data.activities)
-        } else if (apiResponse.data.activity) {
-          setResults([apiResponse.data.activity])
-        } else {
-          setError('No activities received in response')
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const numVariants = parseInt(formData.num_variants) || 1
+      const accumulatedTexts = Array(numVariants).fill('')
+      let currentVariant = 0
+
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) {
+          break
         }
-        setCurrentPage(0)  // Reset to first page
-        setError(null)
-      } else {
-        const errorMsg = apiResponse.data.error || 'Failed to generate activity'
-        setError(errorMsg)
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              
+              if (data.type === 'error') {
+                setError(data.content)
+                setIsStreaming(false)
+                setLoading(false)
+                return
+              } else if (data.type === 'variant_separator') {
+                // New variant starting
+                currentVariant = data.variant - 1
+                setCurrentStreamingVariant(currentVariant)
+                setStreamingTexts(prev => {
+                  const newTexts = [...prev]
+                  newTexts[currentVariant] = ''
+                  return newTexts
+                })
+              } else if (data.type === 'content') {
+                // Content for current variant
+                const variantIdx = (data.variant || currentVariant + 1) - 1
+                accumulatedTexts[variantIdx] += data.content
+                setStreamingTexts(prev => {
+                  const newTexts = [...prev]
+                  newTexts[variantIdx] = accumulatedTexts[variantIdx]
+                  return newTexts
+                })
+                setCurrentStreamingVariant(variantIdx)
+              } else if (data.type === 'variant_complete') {
+                // Variant complete, save it
+                const variantIdx = data.variant - 1
+                setResults(prev => {
+                  const newResults = [...prev]
+                  newResults[variantIdx] = accumulatedTexts[variantIdx]
+                  return newResults
+                })
+              } else if (data.type === 'done') {
+                // All streaming complete - properly reset all states
+                // Ensure all variants are saved
+                const finalResults = accumulatedTexts.filter(text => text.length > 0)
+                setResults(finalResults)
+                setCurrentPage(0)
+                setIsStreaming(false)
+                setIsThinking(false)
+                setLoading(false)
+                // Ensure we don't continue processing
+                return
+              } else if (data.type === 'status') {
+                // Status updates - show what's happening in backend (real-time)
+                setIsThinking(data.content && data.content.includes('Generating'))
+                if (data.content && !data.content.includes('Generating')) {
+                  console.log('Status:', data.content, 'for variant', data.variant || 'all')
+                }
+        } else {
+                console.log('Unknown event type:', data.type, data)
+              }
+            } catch (parseError) {
+              console.error('Error parsing SSE data:', parseError, line)
+              // Don't stop on parse errors, just log them
+            }
+          }
+        }
       }
+
+      // Finalize if streaming completed without 'done' event
+      console.log('Streaming completed. Accumulated texts:', accumulatedTexts.map(t => t.length))
+      const finalResults = accumulatedTexts.filter(text => text.length > 0)
+      if (finalResults.length > 0) {
+        console.log('Setting results with', finalResults.length, 'variants')
+        setResults(finalResults)
+        setCurrentPage(0)
+      } else {
+        console.warn('No content accumulated! Check backend logs.')
+        setError('No content was generated. Please check the console for errors.')
+      }
+      // Always reset all states when stream ends
+      setIsStreaming(false)
+      setIsThinking(false)
+      setLoading(false)
+
     } catch (err) {
-      console.error('API Error:', err)
-      if (err.response) {
-        setError(`Server error (${err.response.status}): ${err.response.data?.detail || err.response.data?.error || 'Server error occurred'}`)
-      } else if (err.request) {
-        console.error('No response received:', err.request)
-        setError(`Cannot connect to backend server. Please make sure the backend is running on port 8000.`)
-      } else {
-        console.error('Request setup error:', err.message)
-        setError(`Request error: ${err.message}`)
-      }
-    } finally {
+      console.error('Streaming Error:', err)
+      setError(`Error: ${err.message}`)
+      setIsStreaming(false)
+      setIsThinking(false)
       setLoading(false)
     }
   }
@@ -573,7 +847,7 @@ const ActivityForm = () => {
                 type="button"
                 className="submit-button clear-button"
                 onClick={handleClear}
-                disabled={loading}
+                disabled={loading || isStreaming}
               >
                 <span className="star-icon">✕</span>
                 Clear
@@ -582,13 +856,13 @@ const ActivityForm = () => {
                 type="button"
                 className="submit-button regenerate-button"
                 onClick={handleRegenerate}
-                disabled={loading}
+                disabled={loading || isStreaming}
                 style={{ marginLeft: '10px' }}
               >
-                {loading ? (
+                {(loading || isStreaming) ? (
                   <>
                     <span className="spinner"></span>
-                    Regenerating...
+                    {isStreaming ? 'Generating...' : 'Regenerating...'}
                   </>
                 ) : (
                   <>
@@ -602,12 +876,12 @@ const ActivityForm = () => {
             <button
               type="submit"
               className="submit-button"
-              disabled={loading}
+              disabled={loading || isStreaming}
             >
-              {loading ? (
+              {(loading || isStreaming) ? (
                 <>
                   <span className="spinner"></span>
-                  Generating...
+                  {isStreaming ? 'Generating...' : 'Preparing...'}
                 </>
               ) : (
                 <>
@@ -625,18 +899,40 @@ const ActivityForm = () => {
           </div>
         )}
 
-        {results.length > 0 && (
+        {(isStreaming || results.length > 0) && (
           <div className="response-container">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <h3 className="response-title">Generated Lesson Plan:</h3>
-              {results.length > 1 && (
+              {!isStreaming && results.length > 1 && (
                 <div className="pagination-info">
                   Variant {currentPage + 1} of {results.length}
                 </div>
               )}
+              {(isStreaming || isThinking || loading) && (
+                <div className="pagination-info status-indicator">
+                  {isThinking && !isStreaming ? (
+                    <span className="thinking-indicator">
+                      <span className="thinking-dot"></span>
+                      <span className="thinking-dot"></span>
+                      <span className="thinking-dot"></span>
+                      <span style={{ marginLeft: '8px' }}>Thinking...</span>
+                    </span>
+                  ) : isStreaming ? (
+                    <>
+                      <span className="spinner" style={{ display: 'inline-block', marginRight: '8px' }}></span>
+                      <span>Generating variant {currentStreamingVariant + 1} of {Math.max(streamingTexts.length, parseInt(formData.num_variants) || 1)}...</span>
+                    </>
+                  ) : loading ? (
+                    <>
+                      <span className="spinner" style={{ display: 'inline-block', marginRight: '8px' }}></span>
+                      <span>Preparing...</span>
+                    </>
+                  ) : null}
+                </div>
+              )}
             </div>
             
-            {results.length > 1 && (
+            {!isStreaming && results.length > 1 && (
               <div className="pagination-controls">
                 <button
                   type="button"
@@ -657,11 +953,28 @@ const ActivityForm = () => {
               </div>
             )}
 
-            <div className="response-content lesson-plan">
-              <div 
-                className="lesson-plan-content" 
-                dangerouslySetInnerHTML={{__html: formatLessonPlan(results[currentPage])}} 
-              />
+            <div className="response-content lesson-plan" ref={responseContainerRef}>
+              {isThinking && !isStreaming ? (
+                <div className="thinking-container">
+                  <div className="thinking-message">
+                    <span className="thinking-dot"></span>
+                    <span className="thinking-dot"></span>
+                    <span className="thinking-dot"></span>
+                    <span style={{ marginLeft: '12px' }}>Preparing your lesson plan...</span>
+                  </div>
+                </div>
+              ) : isStreaming ? (
+                <div className="lesson-plan-content streaming-content">
+                  <div 
+                    dangerouslySetInnerHTML={{__html: formatLessonPlan(streamingTexts[currentStreamingVariant] || '')}} 
+                  />
+                </div>
+              ) : results.length > 0 ? (
+                <div 
+                  className="lesson-plan-content completed-content" 
+                  dangerouslySetInnerHTML={{__html: formatLessonPlan(results[currentPage])}} 
+                />
+              ) : null}
             </div>
           </div>
         )}

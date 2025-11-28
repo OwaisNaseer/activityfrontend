@@ -83,6 +83,8 @@
 .submit-button:disabled {
   background-color: #9bb5d3;
   cursor: not-allowed;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
 }
 
 .regenerate-button {
@@ -153,6 +155,17 @@
   padding: 6px 12px;
   background-color: #f0f0f0;
   border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.pagination-info.status-indicator {
+  background-color: #e3f2fd;
+  color: #1976d2;
+  border: 1px solid #bbdefb;
+}
+
+.pagination-info.status-indicator .thinking-indicator {
+  color: #1976d2;
 }
 
 .pagination-controls {
@@ -201,6 +214,10 @@
   border: 1px solid #eee;
   max-height: 600px;
   overflow-y: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: #c1c1c1 #f1f1f1;
+  position: relative;
 }
 
 .response-content pre {
@@ -225,6 +242,24 @@
 
 .lesson-plan-content {
   color: #333;
+  transition: opacity 0.2s ease;
+}
+
+.lesson-plan-content.streaming-content {
+  animation: subtle-pulse 2s ease-in-out infinite;
+}
+
+.lesson-plan-content.completed-content {
+  opacity: 1;
+}
+
+@keyframes subtle-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.98;
+  }
 }
 
 .lesson-title {
@@ -300,6 +335,116 @@
   
   .lesson-section {
     font-size: 1.25rem;
+  }
+}
+
+/* Streaming cursor animation */
+/* Removed blinking cursor - replaced with thinking indicator */
+
+/* Thinking indicator (GPT-style animated dots) */
+.thinking-container {
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.thinking-message {
+  display: inline-flex;
+  align-items: center;
+  color: #666;
+  font-size: 16px;
+}
+
+.thinking-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.thinking-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #4a90e2;
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.thinking-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinking-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes thinking-pulse {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Smooth variant transitions */
+.variant-transition {
+  animation: fade-in 0.3s ease-in;
+}
+
+.lesson-plan-content.fade-out {
+  animation: fade-out 0.2s ease-out;
+  opacity: 0;
+}
+
+.lesson-plan-content.fade-in {
+  animation: fade-in 0.3s ease-in;
+  opacity: 1;
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Old streaming-cursor (removed) */
+.streaming-cursor-old {
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background-color: #4a90e2;
+  margin-left: 2px;
+  animation: blink 1s infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  51%, 100% {
+    opacity: 0;
   }
 }
 
