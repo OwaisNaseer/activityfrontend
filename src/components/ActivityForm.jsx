@@ -403,8 +403,11 @@ const ActivityForm = () => {
                 setCurrentStreamingVariant(variantIdx)
               } else if (data.type === 'status') {
                 // Status updates - show what's happening in backend
-                setIsThinking(data.content && data.content.includes('Generating'))
-                if (data.content && !data.content.includes('Generating')) {
+                if (data.content) {
+                  if (data.content.includes('Thinking') || data.content.includes('Generating')) {
+                    setIsThinking(true)
+                  }
+                  // Log status for debugging
                   console.log('Status:', data.content, 'for variant', data.variant || 'all')
                 }
               } else if (data.type === 'variant_complete') {
